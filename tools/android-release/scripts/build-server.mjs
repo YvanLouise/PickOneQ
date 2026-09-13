@@ -204,6 +204,7 @@ export function inspectEnvironment(targetSdk = 35) {
     java, gradle, androidSdk, buildTools,
     githubPublisherConfigured: Boolean(github.token),
     githubPublisherSource: github.source,
+    defaultWebUrl: String(process.env.PICKONEQ_WEB_URL || '').trim(),
     releaseSuggestion: localReleaseSuggestion(),
     javaPath, javaVersion, gradlePath, gradleVersion, sdkPath, compileSdk,
     message: missing.length ? `缺少：${missing.join('、')}。请按 docs/android-release.md 配置后重新检查。` : `JDK ${javaVersion} · Gradle ${gradleVersion} · Android API ${compileSdk}`,
@@ -249,7 +250,10 @@ export function validateConfig(config) {
   if (!String(config.appName || '').trim()) return '请填写应用名称';
   if (!/^([a-zA-Z][\w]*\.)+[a-zA-Z][\w]*$/.test(String(config.packageName || ''))) return '应用包名格式不正确';
   if (config.sourceMode !== 'remote') return '拾一问 Android 包仅支持远程 Web 服务模式';
-  if (!isValidUrl(config.webUrl)) return '拾一问服务地址必须是 HTTP 或 HTTPS 地址';
+  if (!String(config.webUrl || '').trim()) return '请先填写已部署的拾一问服务地址';
+  if (!isValidUrl(config.webUrl)) return '拾一问服务地址格式不正确，请填写完整地址';
+  const webHost = new URL(String(config.webUrl)).hostname;
+  if (['127.0.0.1', 'localhost', '::1'].includes(webHost)) return '手机无法访问电脑的 127.0.0.1，请填写线上地址或电脑的局域网 IP';
   if (String(config.webUrl).startsWith('http:') && !config.allowHttp) return 'HTTP 地址需要开启“允许 HTTP”';
   if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(String(config.versionName || ''))) return '版本名称应使用 1.0.0 格式';
   if (!Number.isInteger(config.versionCode) || config.versionCode < 1) return '版本号必须是大于 0 的整数';

@@ -10,6 +10,8 @@ npm run android:release
 
 拾一问的前端依赖 Node 服务保存数据、调用 DeepSeek 和提前生成问题，因此 Android 包使用远程 Web 服务模式。先将完整 Node 服务部署到 HTTPS 地址，再把该地址填入发布工具。
 
+可在管理页填写地址，也可复制 .env.example 为 .env，设置 PICKONEQ_WEB_URL=https://你的域名 后重新启动工具自动预填。不要填写 127.0.0.1 或 localhost，它们在手机上指向手机自身。
+
 “仅本地打包”生成 Debug 或 Release APK，不访问 GitHub。“一键打包并发布”还会：
 
 1. 创建或复用 `v<versionName>` GitHub Release。

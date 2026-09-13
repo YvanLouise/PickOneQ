@@ -157,7 +157,7 @@ export function ConfigPanel({ activeSection, config, onChange }: ConfigPanelProp
         <div className="form-grid">
           <Field label="应用名称" required count={`${config.appName.length}/50`}><input maxLength={50} value={config.appName} onChange={(e) => onChange('appName', e.target.value)} /></Field>
           <Field label="内容来源"><input value="远程拾一问 Web 服务" readOnly /></Field>
-          <Field label="WebApp 地址" required hint="发布使用 HTTPS；手机调试可使用局域网 HTTP 地址"><input type="url" placeholder="https://pickoneq.example.com" value={config.webUrl} onChange={(e) => onChange('webUrl', e.target.value)} /></Field>
+          <Field label="拾一问服务地址" required hint="线上填写已部署的 HTTPS 地址；手机调试填写电脑的局域网地址，不能填写 127.0.0.1"><input id="pickoneq-web-url" type="url" placeholder="https://你的拾一问域名" value={config.webUrl} onChange={(e) => onChange('webUrl', e.target.value)} /></Field>
           <div className="security-note"><Icon name="globe" size={18} /><span>GitHub Release 用于分发 APK 与升级清单，不会替你托管拾一问 Node 服务。</span></div>
           <Field label="应用包名" required hint="包名是应用的唯一标识" count={`${config.packageName.length}/100`}><input maxLength={100} value={config.packageName} onChange={(e) => onChange('packageName', e.target.value)} /></Field>
           <div className="form-grid form-grid--two">

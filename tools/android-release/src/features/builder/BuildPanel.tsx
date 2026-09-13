@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Icon } from '../../components/Icon';
-import type { AppConfig, BuildState, EnvironmentState } from '../../types/builder';
+import type { AppConfig, BuildState, EnvironmentState, SectionKey } from '../../types/builder';
 import { advanceVersion, loadBuildHistory, recordSuccessfulBuild, type BuildVersionRecord } from './versioning';
 
 const initialEnvironment: EnvironmentState = {
@@ -16,16 +16,24 @@ const initialEnvironment: EnvironmentState = {
   message: '正在检查本机构建环境…',
 };
 
-function validate(config: AppConfig): string | null {
-  if (!config.appName.trim()) return '请填写应用名称';
-  if (!/^([a-zA-Z][\w]*\.)+[a-zA-Z][\w]*$/.test(config.packageName)) return '应用包名格式不正确';
+function validateWebUrl(config: AppConfig): string | null {
+  if (!config.webUrl.trim()) return '请先填写已部署的拾一问服务地址';
   try {
     const url = new URL(config.webUrl);
     if (!['http:', 'https:'].includes(url.protocol)) return '拾一问服务地址必须使用 HTTP 或 HTTPS';
-    if (url.protocol === 'http:' && !config.allowHttp) return 'HTTP 地址需要先在“其他设置”中允许 HTTP';
+    if (['127.0.0.1', 'localhost', '::1'].includes(url.hostname)) return '手机无法访问电脑的 127.0.0.1，请填写线上 HTTPS 地址或电脑的局域网 IP';
+    if (url.protocol === 'http:' && !config.allowHttp) return '局域网 HTTP 调试地址需要先在“其他设置”中允许 HTTP';
   } catch {
-    return '拾一问服务地址格式不正确';
+    return '拾一问服务地址格式不正确，请填写完整地址，例如 https://pickoneq.example.com';
   }
+  return null;
+}
+
+function validate(config: AppConfig): string | null {
+  if (!config.appName.trim()) return '请填写应用名称';
+  if (!/^([a-zA-Z][\w]*\.)+[a-zA-Z][\w]*$/.test(config.packageName)) return '应用包名格式不正确';
+  const webUrlIssue = validateWebUrl(config);
+  if (webUrlIssue) return webUrlIssue;
   if (!Number.isInteger(config.versionCode) || config.versionCode < 1) return '版本号必须是大于 0 的整数';
   if (config.signingMode === 'release' && (!config.keystorePath || !config.keyAlias || !config.storePassword || !config.keyPassword)) return '请完整填写 Release 签名信息';
   return null;
@@ -36,9 +44,10 @@ type BuildPanelProps = {
   build: BuildState;
   onBuildChange: (state: BuildState) => void;
   onConfigChange: <K extends keyof AppConfig>(key: K, value: AppConfig[K]) => void;
+  onSectionChange: (section: SectionKey) => void;
 };
 
-export function BuildPanel({ config, build, onBuildChange, onConfigChange }: BuildPanelProps) {
+export function BuildPanel({ config, build, onBuildChange, onConfigChange, onSectionChange }: BuildPanelProps) {
   const [environment, setEnvironment] = useState<EnvironmentState>(initialEnvironment);
   const [versionHistory, setVersionHistory] = useState<BuildVersionRecord[]>(loadBuildHistory);
   const busy = build.phase === 'validating' || build.phase === 'building';
@@ -67,6 +76,7 @@ export function BuildPanel({ config, build, onBuildChange, onConfigChange }: Bui
       if (!response.ok) throw new Error();
       const data = await response.json() as Omit<EnvironmentState, 'loading'>;
       setEnvironment({ ...data, loading: false });
+      if (data.defaultWebUrl && !config.webUrl.trim()) onConfigChange('webUrl', data.defaultWebUrl);
       if (data.releaseSuggestion?.packageName === config.packageName && data.releaseSuggestion.nextVersionCode > config.versionCode) {
         onConfigChange('versionName', data.releaseSuggestion.nextVersionName);
         onConfigChange('versionCode', data.releaseSuggestion.nextVersionCode);
@@ -82,6 +92,7 @@ export function BuildPanel({ config, build, onBuildChange, onConfigChange }: Bui
     const repositoryIsValid = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(config.githubRepository);
     const effectiveManifestUrl = config.updateManifestUrl.trim()
       || (repositoryIsValid ? `https://raw.githubusercontent.com/${config.githubRepository}/${config.githubBranch || 'main'}/app-update.json` : '');
+    const webUrlIssue = validateWebUrl(config);
     const issue = validate(config)
       || (publish && !environment.githubPublisherConfigured ? '未找到 GitHub 登录凭据，请先通过 Git Credential Manager 登录 GitHub' : null)
       || (publish && config.signingMode !== 'release' ? '线上发布必须使用正式 Release 签名' : null)
@@ -90,6 +101,14 @@ export function BuildPanel({ config, build, onBuildChange, onConfigChange }: Bui
       || (publish && !effectiveManifestUrl.startsWith('https://') ? '更新清单地址必须使用 HTTPS' : null)
       || (publish && !config.releaseNotes.trim() ? '请填写本次发布说明' : null);
     if (issue) {
+      if (issue === webUrlIssue) {
+        onSectionChange('info');
+        window.setTimeout(() => {
+          const field = document.getElementById('pickoneq-web-url') as HTMLInputElement | null;
+          field?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          field?.focus();
+        }, 0);
+      }
       onBuildChange({ phase: 'error', progress: 0, operation: publish ? 'publish' : 'build', message: issue, logs: [`[校验失败] ${issue}`] });
       return;
     }

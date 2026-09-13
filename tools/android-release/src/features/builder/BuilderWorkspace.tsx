@@ -26,7 +26,7 @@ export function BuilderWorkspace({ activeSection, config, build, onBuildChange, 
       </div>
       <aside className="builder-workspace__aside">
         <AppPreview config={config} />
-        <BuildPanel config={config} build={build} onBuildChange={onBuildChange} onConfigChange={onConfigChange} />
+        <BuildPanel config={config} build={build} onBuildChange={onBuildChange} onConfigChange={onConfigChange} onSectionChange={onSectionChange} />
       </aside>
     </main>
   );

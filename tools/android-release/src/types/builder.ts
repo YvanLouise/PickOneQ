@@ -75,6 +75,7 @@ export type EnvironmentState = {
   buildTools: boolean;
   githubPublisherConfigured: boolean;
   githubPublisherSource: 'provided' | 'environment' | 'git-credential-manager' | 'missing';
+  defaultWebUrl?: string;
   releaseSuggestion?: {
     packageName: string;
     currentVersionName: string;

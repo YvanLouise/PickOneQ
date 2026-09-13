@@ -28,6 +28,8 @@ function config(overrides = {}) {
 
 test('remote package validation separates local HTTP builds from online releases', () => {
   assert.equal(validateConfig(config()), null);
+  assert.match(validateConfig(config({ webUrl: '' })), /请先填写/);
+  assert.match(validateConfig(config({ webUrl: 'http://127.0.0.1:4311', allowHttp: true })), /手机无法访问/);
   assert.match(validateConfig(config({ sourceMode: 'embedded' })), /仅支持远程/);
   assert.match(validateConfig(config({ webUrl: 'http://192.168.1.2:4311' })), /允许 HTTP/);
   assert.equal(validateConfig(config({ webUrl: 'http://192.168.1.2:4311', allowHttp: true })), null);
