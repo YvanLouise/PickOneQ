@@ -8,6 +8,7 @@ tools/android-release/node_modules/
 tools/android-release/dist/
 tools/android-release/artifacts/
 tools/android-release/.tsbuildinfo/
+tools/android-release/.cache/
 releases/
 .android-build-tools/
 .env.local
