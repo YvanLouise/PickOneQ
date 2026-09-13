@@ -1,0 +1,20 @@
+export type Domain = { id: string; name: string; subtitle: string; keywords: string[]; icon: string };
+export type Source = { id: string; domain: string; title: string; publisher: string; url: string; excerpt: string; retrievedAt: string; hash: string; verified: boolean };
+export type Question = { id: string; title: string; domain: string; category: string; background: string; difficulty: string; answer: string; reasoning: string[]; example: string; misconception: string; hint: string; concepts: string[]; citations: { sourceId: string; quote: string }[]; relatedPrompt: string; relatedId?: string; version: number; model: string; origin: string; contentDesignVersion?: number; conceptReveal?: string; choices?: { id: string; label: string }[] };
+export type FeedbackEvidence = { kind: 'captured' | 'correction' | 'addition'; claim: string; userQuote?: string; sourceId: string; sourceQuote: string };
+export type Feedback = { summary: string; captured: string[]; corrections: ({ type: 'fact' | 'reasoning'; text: string } | string)[]; additions: string[]; verdict: string; evidence?: FeedbackEvidence[] };
+export type Attempt = { id: string; questionId: string; answer: string; choiceId?: string; choiceLabel?: string; confidence: string | null; mode: string; feedback: Feedback; at: number; model: string; questionVersion: number };
+export type Conversation = { id: string; questionId: string; questionVersion: number; turns: { id: string; user: string; status: string; reply?: string; followup?: string; error?: string; evidence?: { claim: string; sourceId: string; quote: string }[] }[] };
+export type State = {
+  version: number; revision: number; onboarding: boolean; currentId: string; currentKind: string; stage: 'question' | 'answer' | 'learn'; newSinceReview: number;
+  conversations?: Record<string, Conversation>;
+  preferences: { weights: Record<string, number>; exploration: number; topics: string[] };
+  drafts: Record<string, { answer: string; choiceId?: string | null; confidence: 'guess' | 'some' | 'sure' | null; at: number }>;
+  history: { questionId: string; at: number; kind: string }[];
+  attempts: Attempt[]; learned: Record<string, { at: number; feeling: string }>;
+  saves: Record<string, { later?: boolean; favorite?: boolean }>;
+  reviews: Record<string, { due: number; interval: number; reason: string }>;
+  reports: { questionId: string; reason: string }[]; model: string;
+};
+export type Snapshot = { state: State; questions: Question[]; sources: Source[]; domains: Domain[]; topicCoverage?: Record<string, string[]>; credential: { configured: boolean; storage: string }; generation: { busy: boolean; phase: 'idle' | 'generating' | 'verifying'; trigger: string; error: string; accepted: number; attempted: number; ready: number; needed: number; target: number; nextRetryAt: number; lastSuccessAt: number; consecutiveFailures: number; autoEnabled: boolean }; storageNotice?: string; csrf: string };
+export type Action = (path: string, body?: unknown, method?: string) => Promise<any>;

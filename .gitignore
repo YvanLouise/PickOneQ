@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.local/
+test-results/
+playwright-report/
+*.log
+tools/android-release/node_modules/
+tools/android-release/dist/
+tools/android-release/artifacts/
+tools/android-release/.tsbuildinfo/
+releases/
+.android-build-tools/
+.env.local
+.env
+!.env.example
