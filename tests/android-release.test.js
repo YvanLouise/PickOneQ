@@ -19,7 +19,7 @@ function config(overrides = {}) {
     appName: '拾一问', packageName: 'com.pickoneq.app', sourceMode: 'remote', webUrl: 'https://pickoneq.example.com',
     versionName: '0.1.0', versionCode: 1, minSdk: 23, targetSdk: 35, orientation: 'portrait', outputType: 'apk',
     signingMode: 'debug', statusBarColor: '#edf4fb', fullscreen: false, hardwareAcceleration: true, pullToRefresh: true,
-    allowHttp: false, updateManifestUrl: '', autoPublish: false, githubRepository: '', githubBranch: 'main', releaseNotes: '',
+    allowHttp: false, updateManifestUrl: 'https://raw.githubusercontent.com/YvanLouise/PickOneQ/main/app-update.json', autoPublish: false, githubRepository: '', githubBranch: 'main', releaseNotes: '',
     permissions: ['INTERNET', 'ACCESS_NETWORK_STATE'], iconDataUrl: '', iconBackground: '#0b3478', iconRadius: 24,
     splashTitle: '拾一问', splashBackground: '#edf4fb', keystorePath: '', keyAlias: '', storePassword: '', keyPassword: '',
     ...overrides,
@@ -43,6 +43,11 @@ test('generated Android project contains PickOneQ wrapper and no YiLin runtime',
   const manifest = await readFile(path.join(root, 'app/src/main/AndroidManifest.xml'), 'utf8');
   assert.match(activity, /https:\/\/pickoneq\.example\.com/);
   assert.match(activity, /PickOneQ-Android-Updater/);
+  assert.match(activity, /raw\.githubusercontent\.com\/YvanLouise\/PickOneQ\/main\/app-update\.json/);
+  assert.match(activity, /addJavascriptInterface\(new UpdateBridge\(\), "PickOneQUpdater"\)/);
+  assert.match(activity, /@JavascriptInterface public void checkForUpdate\(\)/);
+  assert.match(activity, /getVersionName\(\) \{ return "0\.1\.0"; \}/);
+  assert.match(activity, /requestUpdateCheck\(false\)/);
   assert.doesNotMatch(activity, /YiLin|RHVoice|TTS/);
   assert.match(manifest, /REQUEST_INSTALL_PACKAGES/);
   assert.match(manifest, /com\.pickoneq\.app\.fileprovider/);

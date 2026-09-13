@@ -1,10 +1,10 @@
 import type { AppConfig } from '../../types/builder';
 
-export const DEFAULT_UPDATE_MANIFEST_URL = '';
+export const DEFAULT_UPDATE_MANIFEST_URL = 'https://raw.githubusercontent.com/YvanLouise/PickOneQ/main/app-update.json';
 
 export function normalizeUpdateManifestUrl(value: unknown) {
   const normalized = typeof value === 'string' ? value.trim() : '';
-  return normalized;
+  return normalized || DEFAULT_UPDATE_MANIFEST_URL;
 }
 
 export const defaultConfig: AppConfig = {

@@ -328,6 +328,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.SslErrorHandler;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -372,7 +373,7 @@ public class MainActivity extends Activity {
         ${config.fullscreen ? 'getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);' : ''}
         createContent();
         if (state == null) webView.loadUrl(START_URL); else webView.restoreState(state);
-        if (!UPDATE_MANIFEST_URL.isEmpty()) new Thread(() -> checkForUpdate(false)).start();
+        requestUpdateCheck(false);
     }
 
     private void createContent() {
@@ -426,6 +427,7 @@ public class MainActivity extends Activity {
                 catch (ActivityNotFoundException error) { fileCallback = null; return false; }
             }
         });
+        webView.addJavascriptInterface(new UpdateBridge(), "PickOneQUpdater");
         refreshLayout.setEnabled(${Boolean(config.pullToRefresh)});
         refreshLayout.setColorSchemeColors(${colorLiteral(config.iconBackground, '#0b3478')});
         refreshLayout.setOnRefreshListener(() -> webView.reload());
@@ -467,7 +469,21 @@ public class MainActivity extends Activity {
 
     @Override protected void onSaveInstanceState(Bundle state) { webView.saveState(state); super.onSaveInstanceState(state); }
     @Override public void onBackPressed() { if (webView.canGoBack()) webView.goBack(); else super.onBackPressed(); }
-    @Override protected void onDestroy() { if (webView != null) { webView.stopLoading(); webView.destroy(); } super.onDestroy(); }
+    @Override protected void onDestroy() { if (webView != null) { webView.removeJavascriptInterface("PickOneQUpdater"); webView.stopLoading(); webView.destroy(); } super.onDestroy(); }
+
+    private final class UpdateBridge {
+        @JavascriptInterface public void checkForUpdate() { requestUpdateCheck(true); }
+        @JavascriptInterface public String getVersionName() { return "${escapeJava(config.versionName)}"; }
+    }
+
+    private void requestUpdateCheck(boolean manual) {
+        if (UPDATE_MANIFEST_URL.isEmpty()) {
+            if (manual) runOnUiThread(() -> Toast.makeText(this, "尚未配置更新通道", Toast.LENGTH_SHORT).show());
+            return;
+        }
+        if (manual) runOnUiThread(() -> Toast.makeText(this, "正在检查更新", Toast.LENGTH_SHORT).show());
+        new Thread(() -> checkForUpdate(manual)).start();
+    }
 
     private void checkForUpdate(boolean manual) {
         HttpURLConnection connection = null;

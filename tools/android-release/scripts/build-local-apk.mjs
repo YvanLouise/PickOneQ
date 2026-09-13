@@ -33,7 +33,7 @@ const defaults = {
   hardwareAcceleration: true,
   pullToRefresh: true,
   allowHttp: false,
-  updateManifestUrl: '',
+  updateManifestUrl: 'https://raw.githubusercontent.com/YvanLouise/PickOneQ/main/app-update.json',
   autoPublish: publish,
   githubRepository: '',
   githubBranch: 'main',
