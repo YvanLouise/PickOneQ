@@ -130,7 +130,7 @@ export function createApp({ store, credentials, modelCall = complete, port = 431
     const selected = selectNext(store.state, all(), { relatedTo });
     if (!selected) {
       requestSupply('题流不足');
-      return res.status(409).json({ error: relatedTo ? '暂时没有新的关联问题，可以返回混合探索。' : credentials.get() ? '现有合格问题已看完，AI 正在后台准备并核验新问题；你的历史记录仍可阅读。' : '已看完当前合格题目。可在“我的”配置模型自动准备新问题；历史中的问题仍可阅读。' });
+      return res.status(409).json({ error: relatedTo ? '暂时没有新的关联问题，可以返回混合探索。' : credentials.get() ? '现有合格问题已看完，AI 正在后台准备并核验新问题。你也可以主动重温一问。' : '已看完当前合格题目。可以主动重温一问，或配置模型自动准备新问题。' });
     }
     store.mutate(s => {
       s.currentId = selected.question.id; s.currentKind = selected.kind; s.stage = 'question';
@@ -138,6 +138,23 @@ export function createApp({ store, credentials, modelCall = complete, port = 431
       recordHistory(s, { questionId: selected.question.id, kind: selected.kind, at: Date.now() });
       event(s, selected.kind === 'related' ? 'transfer-enter' : 'exposure', selected.question.id);
     }); requestSupply('取用问题后补充'); ok(res);
+  }));
+  app.post('/api/replay', route((req, res) => {
+    const questions = all();
+    const modern = questions.some(q => q.contentDesignVersion === 2);
+    const reported = new Set(store.state.reports.map(item => item.questionId));
+    const lastSeen = new Map();
+    for (const item of store.state.history) lastSeen.set(item.questionId, item.at);
+    const eligible = questions.filter(q => (!modern || q.contentDesignVersion === 2) && !reported.has(q.id))
+      .sort((a, b) => (lastSeen.get(a.id) || 0) - (lastSeen.get(b.id) || 0));
+    const selected = eligible.find(q => q.id !== store.state.currentId) || eligible[0];
+    if (!selected) return res.status(409).json({ error: '当前没有可重温的合格问题。' });
+    store.mutate(s => {
+      s.currentId = selected.id; s.currentKind = 'revisit'; s.stage = 'question';
+      recordHistory(s, { questionId: selected.id, kind: 'revisit', at: Date.now() });
+      event(s, 'revisit-enter', selected.id);
+    });
+    ok(res);
   }));
   app.post('/api/open', route((req, res) => {
     const q = getQuestion(req.body.id);

@@ -56,6 +56,30 @@ test('isolated API end-to-end: onboarding, learning, persistence, errors and sec
     await t.test('skip adds history but not saved tasks', async () => {
       const next = await request('next', {}); assert.equal(next.status, 200); assert.equal(Object.keys(next.body.state.saves).length, 0);
     });
+    await t.test('exhausted feed offers an explicit revisit without creating learning tasks', async () => {
+      const previous = { history: structuredClone(store.state.history), currentId: store.state.currentId, currentKind: store.state.currentKind, stage: store.state.stage };
+      const eligible = boot.body.questions.filter(q => q.contentDesignVersion === 2);
+      store.mutate(s => {
+        s.history = eligible.map((q, index) => ({ questionId: q.id, kind: 'new', at: index + 1 }));
+        s.currentId = eligible.at(-1).id;
+        s.currentKind = 'new';
+        s.stage = 'question';
+      });
+      const exhausted = await request('next', {});
+      assert.equal(exhausted.status, 409);
+      assert.match(exhausted.body.error, /重温一问/);
+      const attempts = store.state.attempts.length;
+      const saves = JSON.stringify(store.state.saves);
+      const reviews = JSON.stringify(store.state.reviews);
+      const replay = await request('replay', {});
+      assert.equal(replay.status, 200);
+      assert.equal(replay.body.state.currentKind, 'revisit');
+      assert.notEqual(replay.body.state.currentId, eligible.at(-1).id);
+      assert.equal(store.state.attempts.length, attempts);
+      assert.equal(JSON.stringify(store.state.saves), saves);
+      assert.equal(JSON.stringify(store.state.reviews), reviews);
+      store.mutate(s => { s.history = previous.history; s.currentId = previous.currentId; s.currentKind = previous.currentKind; s.stage = previous.stage; });
+    });
     await t.test('later and favorite coexist; remove one preserves the other', async () => {
       await request('save', { id: 'seed-map', kind: 'later', value: true });
       await request('save', { id: 'seed-map', kind: 'favorite', value: true });

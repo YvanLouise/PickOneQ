@@ -65,8 +65,8 @@ export function useCardGesture(enabled: boolean, next: () => Promise<boolean>) {
     const cancel = () => { if (origin) { origin = null; element.classList.remove('card-dragging'); void reset(); } };
     const scroll = (event: WheelEvent) => {
       if (event.ctrlKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+      if (switching || Date.now() < cooldown || origin || (event.deltaY < 0 && wheel === 0)) return;
       event.preventDefault();
-      if (switching || Date.now() < cooldown || origin) return;
       clearTimeout(timer);
       animation?.cancel();
       wheel = Math.max(0, wheel + event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? window.innerHeight : 1));

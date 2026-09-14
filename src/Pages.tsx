@@ -6,15 +6,25 @@ import { checkNativeUpdate, hasNativeUpdater, nativeVersionName } from './native
 
 type Props = { data: Snapshot; action: Action; notify: (message: string) => void };
 
-export function Saved({ data, action, notify, open }: Props & { open: (id: string) => void }) {
+export function Saved({ data, action, notify, open, explore }: Props & { open: (id: string) => void; explore: () => void }) {
   const [filter, setFilter] = useState('later');
+  const counts = {
+    later: data.questions.filter(q => data.state.saves[q.id]?.later).length,
+    favorite: data.questions.filter(q => data.state.saves[q.id]?.favorite).length,
+    review: data.questions.filter(q => data.state.reviews[q.id]).length,
+  };
   const qlist = data.questions.filter(q => filter === 'review' ? data.state.reviews[q.id] : data.state.saves[q.id]?.[filter as 'later' | 'favorite'])
     .sort((a, b) => filter === 'review' ? data.state.reviews[a.id].due - data.state.reviews[b.id].due : 0);
-  return <div className="page-content"><header className="page-intro"><span className="serif overline">把值得再想的问题，轻轻留下</span><h1>拾起那些未尽的好奇</h1><p>这里没有欠下的任务，只有你想再次遇见的问题。</p></header><div className="tabs" role="tablist" aria-label="拾遗分类">{[['later', '稍后看', Clock3], ['favorite', '收藏', Bookmark], ['review', '待复习', RefreshCw]].map(([id, label, Icon]) => { const I = Icon as typeof Clock3; return <button role="tab" aria-selected={filter === id} className={filter === id ? 'active' : ''} key={id as string} onClick={() => setFilter(id as string)}><I size={18} />{label as string}</button>; })}</div>
-    <section className="list-panel">{!qlist.length ? <Empty title={filter === 'review' ? '等你想再问一次' : '为好奇留个位置'}>{filter === 'review' ? '学习后选择“以后再问”，它就会在这里等你。' : '遇见值得停留的问题，选择收藏或稍后再看。'}</Empty> : qlist.map(q => <div className="question-row" key={q.id}><DomainIcon domain={q.domain} /><button className="row-title" onClick={() => open(q.id)}><small>{data.domains.find(d => d.id === q.domain)?.name}{filter === 'review' && ` · ${data.state.reviews[q.id].due < Date.now() ? '可以再想一想了' : `${dateText(data.state.reviews[q.id].due)}再问`}`}</small><h3>{q.title}</h3></button><button className="icon-button" aria-label={`移除${q.title}`} onClick={async () => { try { await action(filter === 'review' ? 'review' : 'save', filter === 'review' ? { id: q.id, action: 'cancel' } : { id: q.id, kind: filter, value: false }); } catch (e) { notify((e as Error).message); } }}><Trash2 size={18} /></button><button className="icon-button" aria-label={`打开${q.title}`} onClick={() => open(q.id)}><ArrowRight size={20} /></button></div>)}</section>
+  const remove = async (id: string) => {
+    try {
+      await action(filter === 'review' ? 'review' : 'save', filter === 'review' ? { id, action: 'cancel' } : { id, kind: filter, value: false });
+      notify(filter === 'review' ? '已取消这次复习安排。' : filter === 'favorite' ? '已取消收藏。' : '已从稍后看移除。');
+    } catch (e) { notify((e as Error).message); }
+  };
+  return <div className="page-content"><header className="page-intro"><span className="serif overline">把值得再想的问题，轻轻留下</span><h1>拾起那些未尽的好奇</h1><p>这里没有欠下的任务，只有你想再次遇见的问题。</p></header><div className="tabs" role="tablist" aria-label="拾遗分类">{[['later', '稍后看', Clock3], ['favorite', '收藏', Bookmark], ['review', '待复习', RefreshCw]].map(([id, label, Icon]) => { const I = Icon as typeof Clock3; return <button role="tab" aria-selected={filter === id} className={filter === id ? 'active' : ''} key={id as string} onClick={() => setFilter(id as string)}><I size={18} />{label as string}<span className="tab-count">{counts[id as keyof typeof counts]}</span></button>; })}</div>
+    <section className="list-panel">{!qlist.length ? <div className="empty-with-action"><Empty title={filter === 'review' ? '等你想再问一次' : '为好奇留个位置'}>{filter === 'review' ? '学习后选择“以后再问”，它就会在这里等你。' : '遇见值得停留的问题，选择收藏或稍后再看。'}</Empty><button className="button secondary compact" onClick={explore}>去遇见一问<ArrowRight size={16} /></button></div> : qlist.map(q => <div className="question-row" key={q.id}><DomainIcon domain={q.domain} /><button className="row-title" onClick={() => open(q.id)}><small>{data.domains.find(d => d.id === q.domain)?.name}{filter === 'review' && ` · ${data.state.reviews[q.id].due < Date.now() ? '可以再想一想了' : `${dateText(data.state.reviews[q.id].due)}再问`}`}</small><h3>{q.title}</h3></button><button className="icon-button" aria-label={`移除${q.title}`} onClick={() => void remove(q.id)}><Trash2 size={18} /></button><button className="icon-button" aria-label={`打开${q.title}`} onClick={() => open(q.id)}><ArrowRight size={20} /></button></div>)}</section>
   </div>;
 }
-
 export function Profile({ data, action, notify, showSettings }: Props & { showSettings: () => void }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirm, setConfirm] = useState('');

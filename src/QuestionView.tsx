@@ -1,18 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, Bookmark, BookOpen, Check, CircleHelp, Clock3, ExternalLink, Flag, Lightbulb, PencilLine, RotateCcw } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Bookmark, BookOpen, Check, CircleHelp, Clock3, ExternalLink, Flag, Lightbulb, Pause, PencilLine, Play, RefreshCw, RotateCcw, SlidersHorizontal, Volume2 } from 'lucide-react';
 import type { Action, Attempt, Question, Snapshot } from './types';
 import { DomainIcon, Spinner, dateText } from './ui';
 import { useCardGesture } from './useCardGesture';
+import { useSpeech } from './useSpeech';
 import { Conversation } from './Conversation';
 
-type Props = { data: Snapshot; action: Action; notify: (message: string) => void; settings: () => void };
-export function QuestionView({ data, action, notify, settings }: Props) {
+type Props = { data: Snapshot; action: Action; notify: (message: string) => void; settings: () => void; directions: () => void };
+export function QuestionView({ data, action, notify, settings, directions }: Props) {
   const { state, questions } = data;
   const q = questions.find(q => q.id === state.currentId)!;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [exhausted, setExhausted] = useState(false);
   const [showReport, setShowReport] = useState(false);
   const requestPending = useRef(false);
+  const speech = useSpeech(`${q.title}。${q.background}`);
   const save = state.saves[q.id] || {};
   const attempt = [...state.attempts].reverse().find(a => a.questionId === q.id);
   const today = new Date().toLocaleDateString();
@@ -20,19 +23,21 @@ export function QuestionView({ data, action, notify, settings }: Props) {
   const perform = async (path: string, body: unknown) => {
     if (requestPending.current) return false;
     requestPending.current = true;
-    setBusy(true); setError('');
-    try { await action(path, body); if (path === 'next' || path === 'stage') window.scrollTo({ top: 0, behavior: 'smooth' }); return true; }
-    catch (e) { setError((e as Error).message); return false; }
+    setBusy(true); setError(''); setExhausted(false);
+    try { await action(path, body); if (path === 'next' || path === 'stage' || path === 'replay') window.scrollTo({ top: 0, behavior: 'smooth' }); return true; }
+    catch (e) { setError((e as Error).message); setExhausted(path === 'next'); return false; }
     finally { requestPending.current = false; setBusy(false); }
   };
   const card = useCardGesture(state.stage === 'question', () => perform('next', {}));
-  useEffect(() => { setError(''); setShowReport(false); }, [q.id]);
+  useEffect(() => { setError(''); setExhausted(false); setShowReport(false); }, [q.id]);
   return <>
     {state.currentKind === 'review' && <div className="context-note"><RotateCcw size={16} /> 还记得吗？试着不看解释，再回答一次。</div>}
     {state.currentKind === 'related' && <div className="context-note"><CompassMark /> 沿着好奇，再走一步 <button onClick={() => perform('next', {})}>返回混合探索</button></div>}
-    <article ref={card} className={`question-card ${state.stage !== 'question' ? 'reading-card' : ''}`}>
-      <div className="question-meta"><span><DomainIcon domain={q.domain} />{data.domains.find(d => d.id === q.domain)?.name}</span>
-        <button className={`icon-button ${save.favorite ? 'selected' : ''}`} aria-label={save.favorite ? '取消收藏' : '收藏问题'} title={save.favorite ? '取消收藏' : '收藏问题'} onClick={() => perform('save', { id: q.id, kind: 'favorite', value: !save.favorite })}><Bookmark fill={save.favorite ? 'currentColor' : 'none'} size={23} /></button></div>
+    {state.currentKind === 'revisit' && <div className="context-note"><RefreshCw size={16} /> 这是你主动重温的一问，不会自动算作复习。</div>}
+    <article ref={card} aria-busy={busy} className={`question-card ${state.stage !== 'question' ? 'reading-card' : ''}`}>
+      <div className="question-meta"><span><DomainIcon domain={q.domain} />{data.domains.find(d => d.id === q.domain)?.name}</span><div className="question-tools">
+        {speech.supported && <button className={`icon-button ${speech.speaking ? 'selected' : ''}`} aria-label={speech.speaking ? speech.paused ? '继续朗读题目' : '暂停朗读题目' : '朗读题目'} title={speech.speaking ? speech.paused ? '继续朗读' : '暂停朗读' : '朗读题目'} onClick={speech.toggle}>{speech.speaking && !speech.paused ? <Pause size={20} /> : <Volume2 size={20} />}</button>}
+        <button className={`icon-button ${save.favorite ? 'selected' : ''}`} aria-label={save.favorite ? '取消收藏' : '收藏问题'} title={save.favorite ? '取消收藏' : '收藏问题'} onClick={() => perform('save', { id: q.id, kind: 'favorite', value: !save.favorite })}><Bookmark fill={save.favorite ? 'currentColor' : 'none'} size={23} /></button></div></div>
       {state.currentKind === 'explore' && <div className="explore-note">来自你尚未选择的领域</div>}
       <h1 className="question-title">{q.title}</h1>
       <p className="question-background">{q.background}</p>
@@ -41,8 +46,8 @@ export function QuestionView({ data, action, notify, settings }: Props) {
         <p className="gentle-divider"><span />先想一想，再看解释。<span /></p>
       </>}
       {state.stage === 'answer' && <AnswerForm key={q.id} q={q} data={data} action={action} settings={settings} onComplete={() => perform('stage', { stage: 'learn' })} />}
-      {state.stage === 'learn' && <Explanation key={q.id} q={q} attempt={attempt} {...{ data, action, notify, settings }} onRelated={() => perform('next', { relatedTo: q.id })} />}
-      {error && <div role="alert" className="inline-error">{error}</div>}
+      {state.stage === 'learn' && <Explanation key={q.id} q={q} attempt={attempt} {...{ data, action, notify, settings, directions }} onRelated={() => perform('next', { relatedTo: q.id })} />}
+      {error && <div role="alert" className={`inline-error ${exhausted ? 'feed-empty' : ''}`}><p>{error}</p>{exhausted && <div className="feed-empty-actions"><button className="button compact secondary" disabled={busy} onClick={() => perform('replay', {})}><RefreshCw size={16} />重温一问</button><button className="text-button" onClick={directions}><SlidersHorizontal size={16} />调整方向</button>{!data.credential.configured && <button className="text-button" onClick={settings}><Lightbulb size={16} />配置模型</button>}</div>}</div>}
     </article>
     {state.stage === 'question' && <><section className="mobile-progress"><div><strong>▥ 今日进度</strong><small>持续拾问，积累更大的自己。</small></div><span>✓ 已拾 <b>{learnedToday.length}</b> 问</span><span>♧ 探索领域 <b>{new Set(learnedToday.map(item => item.domain)).size}</b> 个</span></section><button className="mobile-next" disabled={busy} onClick={() => perform('next', {})}>{busy ? '正在拾起下一问…' : '⌄ 下滑进入下一问'}</button></>}
     <div className="question-footer"><button className={`text-button ${save.later ? 'selected' : ''}`} onClick={async () => { await perform('save', { id: q.id, kind: 'later', value: !save.later }); }}><Clock3 size={20} />{save.later ? '已收入拾遗' : '稍后再看'}</button>
@@ -57,7 +62,7 @@ function AnswerForm({ q, data, action, settings, onComplete, mode = 'answer' }: 
   const stored = data.state.drafts[`${q.id}:${mode}`];
   const recoveryKey = `pickoneq-draft-${q.id}-${mode}`;
   const [answer, setAnswer] = useState(() => { try { return localStorage.getItem(recoveryKey) ?? stored?.answer ?? ''; } catch { return stored?.answer ?? ''; } });
-  const [choiceId, setChoiceId] = useState<string | null>(() => { try { return localStorage.getItem(`${recoveryKey}-choice`) ?? stored?.choiceId ?? null; } catch { return stored?.choiceId ?? null; } });
+  const [choiceId, setChoiceId] = useState<string | null>(() => { try { return localStorage.getItem(`${recoveryKey}-choice`) || stored?.choiceId || null; } catch { return stored?.choiceId ?? null; } });
   const [confidence, setConfidence] = useState<'guess' | 'some' | 'sure' | null>(stored?.confidence ?? null);
   const [hint, setHint] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -67,9 +72,10 @@ function AnswerForm({ q, data, action, settings, onComplete, mode = 'answer' }: 
   const submission = useRef<{ signature: string; id: string } | null>(null);
   useEffect(() => {
     const n = ++sequence.current;
+    setSaved('正在保存…');
     try { localStorage.setItem(recoveryKey, answer); localStorage.setItem(`${recoveryKey}-choice`, choiceId || ''); } catch { setSaved('浏览器存储不可用，正在保存到本地服务'); }
     const timeout = window.setTimeout(() => {
-      void action('draft', { id: q.id, answer, choiceId: choiceId || null, confidence, mode }).then(() => { if (sequence.current === n) setSaved('草稿已保存'); }).catch(() => { if (sequence.current === n) setSaved('本地服务保存失败，草稿仍保留在浏览器'); });
+      void action('draft', { id: q.id, answer, choiceId: choiceId || null, confidence, mode }).then(() => { if (sequence.current === n) setSaved('草稿已保存'); }).catch(() => { if (sequence.current === n) setSaved('服务暂不可用，草稿仍保留在浏览器'); });
     }, 400);
     return () => clearTimeout(timeout);
   }, [answer, choiceId, confidence, q.id, action, mode, recoveryKey]);
@@ -82,9 +88,10 @@ function AnswerForm({ q, data, action, settings, onComplete, mode = 'answer' }: 
     finally { setBusy(false); }
   };
   return <section className="answer-form">
-    <div className="section-label"><PencilLine size={18} />{mode === 'restate' ? '用自己的话，再解释一次' : '从你的理解开始'}<span>{saved}</span></div>
+    <div className="section-label"><PencilLine size={18} />{mode === 'restate' ? '用自己的话，再解释一次' : '从你的理解开始'}<span aria-live="polite">{saved}</span></div>
     {mode === 'answer' && q.choices && <div className="judgment-choices" role="group" aria-label="你的初步判断">{q.choices.map(c => <button key={c.id} type="button" disabled={busy} aria-pressed={choiceId === c.id} onClick={() => setChoiceId(choiceId === c.id ? null : c.id)}>{c.label}</button>)}<small className="muted">可以选一个判断，也可以直接写下自己的想法；理由可不填。</small></div>}
     <textarea autoFocus value={answer} maxLength={8000} onChange={e => setAnswer(e.target.value)} placeholder="用自己的话回答即可，不需要标准答案。哪怕只有一句猜想，也值得写下来。" aria-label={mode === 'restate' ? '重新解释' : '你的回答'} disabled={busy} />
+    <div className="answer-count"><span>{answer.trim() ? '已写下你的想法' : '可以只写一句猜想'}</span><span>{answer.length} / 8000</span></div>
     <div className="confidence-row"><span>你有多大把握？<small>（可不选）</small></span><div>{([['guess', '猜的'], ['some', '有些把握'], ['sure', '很确定']] as const).map(([value, label]) => <button disabled={busy} key={value} className={`chip ${confidence === value ? 'active' : ''}`} aria-pressed={confidence === value} onClick={() => setConfidence(confidence === value ? null : value)}>{label}</button>)}</div></div>
     {!data.credential.configured && <div className="soft-note"><Lightbulb size={18} /><span>当前是精选示例体验。回答会保存，配置 Key 后可获得个人反馈。<button className="inline-link" onClick={settings}>配置 DeepSeek</button></span></div>}
     {hint && <div className="hint"><Lightbulb size={18} />{q.hint}</div>}
@@ -98,12 +105,14 @@ function Explanation({ q, attempt, data, action, notify, settings, onRelated }: 
   const [restate, setRestate] = useState(false);
   const [busy, setBusy] = useState(false);
   const feeling = data.state.learned[q.id]?.feeling;
+  const speech = useSpeech(`一句话理解。${q.answer}。为什么会这样。${q.reasoning.join('。')}。换个角度想一想。${q.example}。一个容易忽略的误区。${q.misconception}。你刚刚遇见的概念是，${q.concepts.join('，')}。`);
   const choose = async (value: string) => {
     setBusy(true);
     try { await action('learn', { id: q.id, feeling: value }); notify(value === 'understood' ? '已记录这次学习。理解会在下一次回忆中更清晰。' : value === 'unclear' ? '已安排明天再问，也可以继续重述。' : '已安排三天后再问，可在拾遗中取消。'); }
     catch (e) { notify((e as Error).message); } finally { setBusy(false); }
   };
   return <div className="explanation">
+    {speech.supported && <button className={`speech-control ${speech.speaking ? 'active' : ''}`} onClick={speech.toggle}>{speech.speaking && !speech.paused ? <Pause size={17} /> : speech.speaking ? <Play size={17} /> : <Volume2 size={17} />}{speech.speaking ? speech.paused ? '继续朗读解释' : '暂停朗读解释' : '朗读完整解释'}</button>}
     {attempt && <section className="feedback"><div className="section-label"><PencilLine size={18} />最近一次作答反馈</div><blockquote>{attempt.choiceLabel && <p>你的判断：{attempt.choiceLabel}</p>}{attempt.answer || '未补充理由，本次仅评价判断。'}</blockquote><h3>{attempt.feedback.summary}</h3>
       <div className="feedback-part"><h4>你抓住了什么</h4>{attempt.feedback.captured.length ? attempt.feedback.captured.map((item, i) => <p key={i}>{item}</p>) : <p className="muted">本次暂无可可靠确认的内容。</p>}</div>
       <div className="feedback-part"><h4>需要修正什么</h4>{attempt.feedback.corrections.length ? attempt.feedback.corrections.map((item, i) => { const correction = typeof item === 'string' ? { type: 'fact', text: item } : item; return <p key={i}><span className={`feedback-kind ${correction.type}`}>{correction.type === 'fact' ? '事实错误' : '推理跳跃'}</span>{correction.text}</p>; }) : <p className="muted">本次没有指出明确错误。</p>}</div>
@@ -116,7 +125,7 @@ function Explanation({ q, attempt, data, action, notify, settings, onRelated }: 
     <section className="sources"><h2>知识有出处</h2><p className="muted small-copy">解释基于以下资料。展开可核对保存的原文摘录。</p>{q.citations.map(c => { const source = data.sources.find(s => s.id === c.sourceId)!; return <details key={c.sourceId}><summary><span>{source.publisher}<strong>{source.title}</strong></span><BookOpen size={18} /></summary><blockquote lang="en">{c.quote}</blockquote><div className="source-bottom"><span>资料快照 · {new Date(source.retrievedAt).toLocaleDateString('zh-CN')}</span><a href={source.url} target="_blank" rel="noreferrer">阅读原文<ExternalLink size={14} /></a></div></details>; })}</section>
     <section className="reflection"><h3>现在，理解更清晰了吗？</h3><div className="feeling-options">{[['understood', '理解了', Check], ['unclear', '仍有疑问', CircleHelp], ['later', '以后再问', Clock3]].map(([value, label, Icon]) => { const I = Icon as typeof Check; return <button disabled={busy} className={`chip ${feeling === value ? 'active' : ''}`} key={value as string} aria-pressed={feeling === value} onClick={() => choose(value as string)}><I size={17} />{label as string}</button>; })}</div><button className="text-button" onClick={() => setRestate(!restate)}><PencilLine size={16} />{restate ? '收起重述' : '用一句话再解释，看看是否真的理解'}</button></section>
     {restate && <AnswerForm q={q} data={data} action={action} settings={settings} mode="restate" onComplete={() => setRestate(false)} />}
-    <Conversation q={q} data={data} action={action} />
+    <Conversation q={q} data={data} action={action} settings={settings} />
     <div className="chat-starters"><span className="small-copy muted">这个解释有帮助吗？（可跳过）</span>{[['helpful','有帮助'],['not-helpful','还没讲清']].map(([type,label]) => <button className="chip" key={type} onClick={() => action('event', { type, questionId: q.id }).then(() => notify('已记录你的反馈。')).catch(e => notify(e.message))}>{label}</button>)}</div>
     <button className="related-question" onClick={onRelated}><span><small>换个情境试试</small><strong>{q.relatedId ? q.relatedPrompt : '查看是否有已准备好的迁移题'}</strong></span><ArrowRight /></button>
     <button className="text-button" onClick={() => action('stage', { stage: 'answer' }).catch(e => notify(e.message))}><ArrowLeft size={16} />返回回答</button>
