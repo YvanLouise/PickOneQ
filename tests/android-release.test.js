@@ -13,6 +13,13 @@ import {
   validateUpdateConfig,
   writeProject,
 } from '../tools/android-release/scripts/build-server.mjs';
+import {
+  appBuildGradleSource,
+  assert16kElf,
+  cmakeListsSource,
+  mainActivitySource,
+  readElfLoadAlignments,
+} from '../tools/android-release/scripts/build-local-android.mjs';
 
 function config(overrides = {}) {
   return {
@@ -82,4 +89,49 @@ test('GitHub publisher creates release, uploads APK and updates both manifests',
   assert.equal(result.manifest.apkUrl, 'https://downloads.example/pickoneq.apk');
   assert.ok(calls.some((call) => call.url.endsWith('/contents/app-update.json') && call.method === 'PUT'));
   assert.ok(calls.some((call) => call.url.endsWith('/contents/docs/app-update.json') && call.method === 'PUT'));
+});
+
+test('local Android launcher is 16 KB-ready and recoverable', () => {
+  const activity = mainActivitySource('bundle-test-123');
+  assert.match(activity, /BUNDLE_VERSION = "bundle-test-123"/);
+  assert.match(activity, /BOOTSTRAP_TIMEOUT_MS = 90000L/);
+  assert.match(activity, /pickoneq:\/\/retry/);
+  assert.match(activity, /pickoneq:\/\/repair/);
+  assert.match(activity, /pickoneq:\/\/restart/);
+  assert.match(activity, /startup\.log/);
+  assert.match(activity, /deleteRecursively\(target\)/);
+  assert.match(cmakeListsSource(), /max-page-size=16384/);
+  const gradle = appBuildGradleSource(['arm64-v8a']);
+  assert.match(gradle, /ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON/);
+  assert.ok(gradle.includes("ndkVersion '28.2.13676358'"));
+});
+
+test('ELF guard rejects 4 KB libraries and accepts 16 KB libraries', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pickoneq-elf-'));
+  const elf = Buffer.alloc(120);
+  elf[0] = 0x7f;
+  elf.write('ELF', 1, 'ascii');
+  elf[4] = 2;
+  elf[5] = 1;
+  elf.writeBigUInt64LE(64n, 32);
+  elf.writeUInt16LE(56, 54);
+  elf.writeUInt16LE(1, 56);
+  elf.writeUInt32LE(1, 64);
+  elf.writeBigUInt64LE(0x4000n, 112);
+  const file = path.join(root, 'libnode.so');
+  await writeFile(file, elf);
+  assert.deepEqual(readElfLoadAlignments(file), [0x4000]);
+  assert.deepEqual(assert16kElf(file), [0x4000]);
+  elf.writeBigUInt64LE(0x1000n, 112);
+  await writeFile(file, elf);
+  assert.throws(() => assert16kElf(file), /不兼容 Android 16 KB 页面/);
+});
+
+test('android:apk command builds the standalone runtime and keeps remote wrapper separate', async () => {
+  const rootPackage = JSON.parse(await readFile(path.resolve('package.json'), 'utf8'));
+  const toolPackage = JSON.parse(await readFile(path.resolve('tools/android-release/package.json'), 'utf8'));
+  assert.equal(rootPackage.scripts['android:apk'], 'npm --prefix tools/android-release run build:apk');
+  assert.equal(rootPackage.scripts['android:remote-apk'], 'npm --prefix tools/android-release run build:remote-apk');
+  assert.match(toolPackage.scripts['build:apk'], /build-local-android\.mjs/);
+  assert.match(toolPackage.scripts['build:remote-apk'], /build-local-apk\.mjs/);
 });

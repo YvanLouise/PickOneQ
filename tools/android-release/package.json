@@ -9,7 +9,8 @@
     "dev:server": "node ./scripts/build-server.mjs",
     "open": "node ./scripts/open-web.js",
     "build": "tsc -b && vite build",
-    "build:apk": "node --env-file-if-exists=../../.env ./scripts/build-local-apk.mjs"
+    "build:apk": "node --env-file-if-exists=../../.env ./scripts/build-local-android.mjs",
+    "build:remote-apk": "node --env-file-if-exists=../../.env ./scripts/build-local-apk.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",

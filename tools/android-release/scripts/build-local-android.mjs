@@ -23,7 +23,7 @@
  *   node tools/android-release/scripts/build-local-android.mjs [options]
  *
  * Options:
- *   --abi <csv>     Comma-separated ABIs (default: arm64-v8a,x86_64)
+ *   --abi <csv>     Comma-separated ABIs (default: arm64-v8a)
  *   --skip-gradle   Stage + generate the project only, do not run Gradle
  *   --no-install    Reuse the cached staging node_modules (skip npm install)
  *   --output <dir>  Where to copy the built APK (default: <projectRoot>/releases)
@@ -31,8 +31,9 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, statSync, createWriteStream } from 'node:fs';
+import { existsSync, readdirSync, statSync, createWriteStream, readFileSync } from 'node:fs';
 import { copyFile, cp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import os from 'node:os';
@@ -47,8 +48,10 @@ const localRuntimeDir = path.join(toolRoot, 'local-runtime');
 const cacheDir = path.join(toolRoot, '.cache');
 const defaultOutput = path.join(projectRoot, 'releases');
 
-const NODE_MOBILE_RELEASE = 'v18.20.4';
-const NODE_MOBILE_API = `https://api.github.com/repos/nodejs-mobile/nodejs-mobile/releases/tags/${NODE_MOBILE_RELEASE}`;
+const NODE_MOBILE_PACKAGE = '@comapeo/nodejs-mobile-react-native';
+const NODE_MOBILE_VERSION = '18.20.4-2';
+const NODE_MOBILE_TARBALL = `https://registry.npmjs.org/@comapeo/nodejs-mobile-react-native/-/nodejs-mobile-react-native-${NODE_MOBILE_VERSION}.tgz`;
+const NODE_MOBILE_ARCHIVE = `comapeo-nodejs-mobile-react-native-${NODE_MOBILE_VERSION}.tgz`;
 const BUILD_ID = process.env.PICKONEQ_LOCAL_BUILD_ID || 'local';
 
 const ANDROID_PACKAGE = 'com.pickoneq.app';
@@ -70,7 +73,7 @@ function printUsage() {
   console.log(`用法：node tools/android-release/scripts/build-local-android.mjs [选项]
 
 选项：
-  --abi <csv>     逗号分隔的 ABI（默认：arm64-v8a,x86_64）
+  --abi <csv>     逗号分隔的 ABI（默认：arm64-v8a）
   --skip-gradle   仅暂存并生成 Android 工程，不运行 Gradle
   --no-install    复用缓存的 stage/node_modules，跳过 npm install
   --output <dir>  APK 输出目录（默认：<项目根>/releases）
@@ -79,7 +82,7 @@ function printUsage() {
 
 function parseArgs(argv) {
   const options = {
-    abis: ['arm64-v8a', 'x86_64'],
+    abis: ['arm64-v8a'],
     skipGradle: false,
     noInstall: false,
     output: defaultOutput,
@@ -194,6 +197,49 @@ function findFiles(root, predicate) {
   return matches;
 }
 
+function readElfLoadAlignments(file) {
+  const data = readFileSync(file);
+  if (data.length < 64 || data[0] !== 0x7f || data.toString('ascii', 1, 4) !== 'ELF') {
+    throw new Error(`${file} 不是有效的 ELF 文件`);
+  }
+  const elfClass = data[4];
+  if (data[5] !== 1 || (elfClass !== 1 && elfClass !== 2)) throw new Error(`${file} 使用了不支持的 ELF 格式`);
+  const readU16 = (offset) => data.readUInt16LE(offset);
+  const readU32 = (offset) => data.readUInt32LE(offset);
+  const readU64 = (offset) => Number(data.readBigUInt64LE(offset));
+  const programOffset = elfClass === 2 ? readU64(32) : readU32(28);
+  const entrySize = readU16(elfClass === 2 ? 54 : 42);
+  const entryCount = readU16(elfClass === 2 ? 56 : 44);
+  const alignments = [];
+  for (let index = 0; index < entryCount; index += 1) {
+    const offset = programOffset + index * entrySize;
+    if (offset + entrySize > data.length) throw new Error(`${file} 的 ELF 程序头已损坏`);
+    if (readU32(offset) !== 1) continue;
+    alignments.push(elfClass === 2 ? readU64(offset + 48) : readU32(offset + 28));
+  }
+  if (!alignments.length) throw new Error(`${file} 没有可加载的 ELF 段`);
+  return alignments;
+}
+
+function assert16kElf(file) {
+  const alignments = readElfLoadAlignments(file);
+  if (alignments.some((alignment) => alignment < 0x4000)) {
+    throw new Error(`${path.basename(file)} 不兼容 Android 16 KB 页面：LOAD 对齐为 ${alignments.map((value) => `0x${value.toString(16)}`).join(', ')}`);
+  }
+  return alignments;
+}
+
+function runtimeFingerprint(root) {
+  const hash = createHash('sha256');
+  const files = findFiles(root, () => true).sort((a, b) => a.localeCompare(b));
+  for (const file of files) {
+    hash.update(path.relative(root, file).replaceAll('\\', '/'));
+    hash.update('\0');
+    hash.update(readFileSync(file));
+    hash.update('\0');
+  }
+  return hash.digest('hex').slice(0, 16);
+}
 /* ------------------------------------------------------------------ *
  * Staging: <buildRoot>/stage  ->  assets/nodejs-project/
  * ------------------------------------------------------------------ */
@@ -254,17 +300,6 @@ async function stageRuntime(options, buildRoot) {
 /* ------------------------------------------------------------------ *
  * nodejs-mobile v18.20.4 (cached under tools/android-release/.cache)
  * ------------------------------------------------------------------ */
-
-async function resolveNodeMobileAsset() {
-  const response = await fetch(NODE_MOBILE_API, {
-    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'pickoneq-local-build', 'X-GitHub-Api-Version': '2022-11-28' },
-  });
-  if (!response.ok) throw new Error(`GitHub API 请求失败（HTTP ${response.status}）`);
-  const release = await response.json();
-  const asset = (release.assets || []).find((item) => /android/i.test(item.name) && /\.zip$/i.test(item.name));
-  if (!asset) throw new Error(`nodejs-mobile ${NODE_MOBILE_RELEASE} 未找到包含 "android" 且以 .zip 结尾的资源`);
-  return asset;
-}
 
 async function fetchToFile(url, destination) {
   const response = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': 'pickoneq-local-build' } });
@@ -327,47 +362,37 @@ function findNodeMobileRoot(directory) {
   return '';
 }
 
-function extractZip(zip, destination) {
-  if (process.platform === 'win32') {
-    const quote = (value) => String(value).replaceAll("'", "''");
-    const script = `Expand-Archive -LiteralPath '${quote(zip)}' -DestinationPath '${quote(destination)}' -Force`;
-    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { encoding: 'utf8', windowsHide: true });
-    if (result.status !== 0) throw new Error(`解压失败：${(result.stderr || result.stdout || '').trim()}`);
-    return;
-  }
-  const result = spawnSync('unzip', ['-o', zip, '-d', destination], { encoding: 'utf8', windowsHide: true });
+function extractTarball(archive, destination) {
+  const tar = commandPath('tar') || commandPath('tar.exe');
+  if (!tar) throw new Error('未找到 tar，无法解压 Node Mobile 运行库。');
+  const result = spawnSync(tar, ['-xzf', archive, '-C', destination], { encoding: 'utf8', windowsHide: true });
   if (result.status !== 0) throw new Error(`解压失败：${(result.stderr || result.stdout || '').trim()}`);
 }
 
 async function ensureNodeMobile() {
   await mkdir(cacheDir, { recursive: true });
-  const asset = await retry('解析 nodejs-mobile 资源', 3, () => resolveNodeMobileAsset());
-  const zipPath = path.join(cacheDir, asset.name);
-  if (!existsSync(zipPath) || statSync(zipPath).size === 0) {
-    log(`下载 nodejs-mobile ${NODE_MOBILE_RELEASE}：${asset.name}`);
-    // Download into an ASCII temp path first: external downloaders (curl,
-    // PowerShell) can choke on the non-ASCII repository path, while Node's fs
-    // handles the cache copy fine.
-    const tempZip = path.join(os.tmpdir(), 'pickoneq-local', asset.name);
-    await mkdir(path.dirname(tempZip), { recursive: true });
-    await retry('下载 nodejs-mobile', 3, () => downloadFile(asset.browser_download_url, tempZip));
-    await mkdir(cacheDir, { recursive: true });
-    await copyFile(tempZip, zipPath);
-    await rm(tempZip, { force: true });
+  const archivePath = path.join(cacheDir, NODE_MOBILE_ARCHIVE);
+  if (!existsSync(archivePath) || statSync(archivePath).size === 0) {
+    log(`下载 ${NODE_MOBILE_PACKAGE} ${NODE_MOBILE_VERSION}（含 Android 16 KB 页面修复）`);
+    const tempArchive = path.join(os.tmpdir(), 'pickoneq-local', NODE_MOBILE_ARCHIVE);
+    await mkdir(path.dirname(tempArchive), { recursive: true });
+    await retry('下载 Node Mobile', 3, () => downloadFile(NODE_MOBILE_TARBALL, tempArchive));
+    await copyFile(tempArchive, archivePath);
+    await rm(tempArchive, { force: true });
   } else {
-    log(`使用缓存的 nodejs-mobile 压缩包：${zipPath}`);
+    log(`使用缓存的 16 KB 兼容 Node Mobile：${archivePath}`);
   }
 
-  const extractDir = path.join(cacheDir, `nodejs-mobile-${NODE_MOBILE_RELEASE}`);
+  const extractDir = path.join(cacheDir, `nodejs-mobile-comapeo-${NODE_MOBILE_VERSION}`);
   let root = findNodeMobileRoot(extractDir);
   if (!root) {
     await rm(extractDir, { recursive: true, force: true });
     await mkdir(extractDir, { recursive: true });
-    log(`解压 nodejs-mobile 到 ${extractDir}`);
-    extractZip(zipPath, extractDir);
+    log(`解压 Node Mobile 到 ${extractDir}`);
+    extractTarball(archivePath, extractDir);
     root = findNodeMobileRoot(extractDir);
   }
-  if (!root) throw new Error('解压后未找到 nodejs-mobile 目录结构（缺少 include/node/node.h）');
+  if (!root) throw new Error('解压后未找到 Node Mobile 目录结构（缺少 include/node/node.h）');
   return root;
 }
 
@@ -379,7 +404,7 @@ function abiFiltersLiteral(abis) {
   return abis.map((abi) => `'${abi}'`).join(', ');
 }
 
-function mainActivitySource() {
+function mainActivitySource(bundleVersion) {
   return `package ${ANDROID_PACKAGE};
 
 import android.app.Activity;
@@ -391,6 +416,8 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Process;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -414,30 +441,36 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.net.HttpURLConnection;
 import java.net.URL;
 
 public class MainActivity extends Activity {
+    private static final String TAG = "PickOneQ";
     private static final String LOCAL_ORIGIN = "http://127.0.0.1:4311";
-    private static final String BUNDLE_VERSION = "local-1";
+    private static final String BUNDLE_VERSION = "${bundleVersion}";
     private static final String BUNDLE_ASSET = "nodejs-project";
     private static final int FILE_CHOOSER_REQUEST = 41;
-    private static final long BOOTSTRAP_TIMEOUT_MS = 20000L;
-    private static final long BOOTSTRAP_POLL_MS = 250L;
+    private static final long BOOTSTRAP_TIMEOUT_MS = 90000L;
+    private static final long BOOTSTRAP_POLL_MS = 300L;
 
     static {
         System.loadLibrary("native-lib");
         System.loadLibrary("node");
     }
 
-    // Static guard: an Activity recreate must never start Node a second time.
-    private static boolean started = false;
     private static final Object START_LOCK = new Object();
+    private static volatile boolean nodeLaunchAttempted = false;
+    private static volatile boolean nodeRunning = false;
+    private static volatile String startupFailure = "";
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private WebView webView;
     private View splash;
+    private TextView splashStatus;
     private ValueCallback<Uri[]> fileCallback;
+    private int pollGeneration = 0;
 
     private native int startNodeWithArguments(String[] arguments, String workingDir);
 
@@ -470,6 +503,10 @@ public class MainActivity extends Activity {
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
                 String scheme = uri == null ? "" : uri.getScheme();
+                if ("pickoneq".equalsIgnoreCase(scheme)) {
+                    handleRecoveryAction(uri == null ? "" : uri.getHost());
+                    return true;
+                }
                 if ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) return false;
                 try {
                     startActivity(new Intent(Intent.ACTION_VIEW, uri));
@@ -479,7 +516,7 @@ public class MainActivity extends Activity {
 
             @Override
             public void onPageFinished(WebView view, String url) {
-                hideSplash();
+                if (url != null && url.startsWith(LOCAL_ORIGIN)) hideSplash();
             }
 
             @Override
@@ -520,22 +557,57 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         progressParams.topMargin = (int) (22 * getResources().getDisplayMetrics().density);
         content.addView(progress, progressParams);
+        splashStatus = new TextView(this);
+        splashStatus.setText("\\u6b63\\u5728\\u51c6\\u5907\\u672c\\u5730\\u670d\\u52a1...");
+        splashStatus.setTextColor(Color.rgb(90, 107, 133));
+        splashStatus.setTextSize(13);
+        splashStatus.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        statusParams.topMargin = (int) (14 * getResources().getDisplayMetrics().density);
+        content.addView(splashStatus, statusParams);
         frame.addView(content, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         return frame;
+    }
+
+    private void updateSplashStatus(final String message) {
+        mainHandler.post(new Runnable() {
+            @Override public void run() {
+                if (splashStatus != null) splashStatus.setText(message);
+            }
+        });
     }
 
     private void startNodeOnce() {
         boolean shouldStart;
         synchronized (START_LOCK) {
-            shouldStart = !started;
-            if (shouldStart) started = true;
+            shouldStart = !nodeLaunchAttempted;
+            if (shouldStart) nodeLaunchAttempted = true;
         }
         if (shouldStart) {
+            startupFailure = "";
             new Thread(new Runnable() {
                 @Override
                 public void run() {
-                    String root = ensureProjectExtracted();
-                    startNodeWithArguments(new String[] { "node", root + "/bootstrap.mjs", "--production" }, root);
+                    boolean enteredNode = false;
+                    try {
+                        updateSplashStatus("\\u6b63\\u5728\\u91ca\\u653e\\u5e94\\u7528\\u8d44\\u6e90...");
+                        String root = ensureProjectExtracted();
+                        updateSplashStatus("\\u6b63\\u5728\\u542f\\u52a8\\u672c\\u5730\\u670d\\u52a1...");
+                        enteredNode = true;
+                        nodeRunning = true;
+                        int exitCode = startNodeWithArguments(new String[] { "node", root + "/bootstrap.mjs", "--production" }, root);
+                        nodeRunning = false;
+                        startupFailure = "Node process exited with code " + exitCode;
+                        writeStartupLog(startupFailure);
+                    } catch (Throwable error) {
+                        nodeRunning = false;
+                        startupFailure = stackTrace(error);
+                        writeStartupLog(startupFailure);
+                        Log.e(TAG, "Local service startup failed", error);
+                        if (!enteredNode) {
+                            synchronized (START_LOCK) { nodeLaunchAttempted = false; }
+                        }
+                    }
                 }
             }, "pickoneq-node").start();
         }
@@ -543,27 +615,23 @@ public class MainActivity extends Activity {
     }
 
     private void waitForServerThenLoad() {
+        final int generation = ++pollGeneration;
+        updateSplashStatus("\\u6b63\\u5728\\u7b49\\u5f85\\u670d\\u52a1\\u5c31\\u7eea...");
         new Thread(new Runnable() {
             @Override
             public void run() {
                 long deadline = System.currentTimeMillis() + BOOTSTRAP_TIMEOUT_MS;
                 boolean ready = false;
-                while (System.currentTimeMillis() < deadline) {
-                    if (bootstrapResponds()) {
-                        ready = true;
-                        break;
-                    }
-                    try {
-                        Thread.sleep(BOOTSTRAP_POLL_MS);
-                    } catch (InterruptedException ignored) {
-                        break;
-                    }
+                while (System.currentTimeMillis() < deadline && generation == pollGeneration) {
+                    if (bootstrapResponds()) { ready = true; break; }
+                    if (!startupFailure.isEmpty() && !nodeRunning) break;
+                    try { Thread.sleep(BOOTSTRAP_POLL_MS); }
+                    catch (InterruptedException ignored) { Thread.currentThread().interrupt(); break; }
                 }
                 final boolean ok = ready;
                 mainHandler.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (isFinishing() || webView == null) return;
+                    @Override public void run() {
+                        if (generation != pollGeneration || isFinishing() || webView == null) return;
                         if (ok) webView.loadUrl(LOCAL_ORIGIN);
                         else showStartupError();
                     }
@@ -588,13 +656,43 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void handleRecoveryAction(String action) {
+        if ("retry".equals(action)) {
+            showSplashAgain("\\u6b63\\u5728\\u91cd\\u65b0\\u68c0\\u6d4b\\u670d\\u52a1...");
+            startNodeOnce();
+        } else if ("repair".equals(action)) {
+            if (!nodeRunning) {
+                deleteRecursively(new File(getFilesDir(), BUNDLE_ASSET));
+                startupFailure = "";
+                synchronized (START_LOCK) { nodeLaunchAttempted = false; }
+            }
+            showSplashAgain("\\u6b63\\u5728\\u4fee\\u590d\\u5e94\\u7528\\u8d44\\u6e90...");
+            startNodeOnce();
+        } else if ("restart".equals(action)) {
+            Intent launch = getPackageManager().getLaunchIntentForPackage(getPackageName());
+            if (launch != null) {
+                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+                startActivity(launch);
+            }
+            Process.killProcess(Process.myPid());
+        }
+    }
+
+    private void showSplashAgain(String message) {
+        if (splash == null && webView != null && webView.getParent() instanceof FrameLayout) {
+            splash = createSplash();
+            ((FrameLayout) webView.getParent()).addView(splash, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+        updateSplashStatus(message);
+    }
+
     private void hideSplash() {
         final View view = splash;
         if (view == null) return;
         splash = null;
+        splashStatus = null;
         view.animate().alpha(0f).setDuration(220).withEndAction(new Runnable() {
-            @Override
-            public void run() {
+            @Override public void run() {
                 ViewGroup parent = (ViewGroup) view.getParent();
                 if (parent != null) parent.removeView(view);
             }
@@ -604,27 +702,31 @@ public class MainActivity extends Activity {
     private void showStartupError() {
         hideSplash();
         if (webView == null) return;
-        String html = "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head>"
-                + "<body style='margin:0;font-family:sans-serif;background:#edf4fb;color:#082752;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center;padding:24px;box-sizing:border-box'>"
-                + "<div><h2>\\u62fe\\u4e00\\u95ee\\u672c\\u5730\\u670d\\u52a1\\u542f\\u52a8\\u5931\\u8d25</h2>"
-                + "<p>Node \\u670d\\u52a1\\u672a\\u80fd\\u5728 20 \\u79d2\\u5185\\u5c31\\u7eea\\u3002</p>"
-                + "<p style='color:#5a6b85;font-size:13px'>\\u8bf7\\u68c0\\u67e5\\u5e94\\u7528\\u5b58\\u50a8\\u7a7a\\u95f4\\u540e\\u91cd\\u8bd5\\u3002</p>"
+        String diagnostic = startupFailure.isEmpty() ? readStartupLog() : startupFailure;
+        if (diagnostic == null || diagnostic.isEmpty()) diagnostic = "Server did not answer /api/bootstrap within 90 seconds.";
+        String html = "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                + "<style>body{margin:0;font-family:sans-serif;background:#edf4fb;color:#082752;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px;box-sizing:border-box}.box{max-width:520px;text-align:center}a{display:block;margin:12px 0;padding:13px 18px;border-radius:14px;background:#0b5f8a;color:white;text-decoration:none}a.secondary{background:white;color:#0b5f8a;border:1px solid #bfd5e5}details{margin-top:18px;text-align:left;color:#5a6b85;font-size:12px;white-space:pre-wrap;word-break:break-word}</style></head>"
+                + "<body><div class='box'><h2>\\u672c\\u5730\\u670d\\u52a1\\u672a\\u80fd\\u542f\\u52a8</h2>"
+                + "<p>\\u5e94\\u7528\\u5df2\\u4fdd\\u7559\\u672c\\u5730\\u6570\\u636e\\uff0c\\u53ef\\u4ee5\\u5148\\u91cd\\u65b0\\u68c0\\u6d4b\\u6216\\u4fee\\u590d\\u5185\\u7f6e\\u8d44\\u6e90\\u3002</p>"
+                + "<a href='pickoneq://retry'>\\u91cd\\u65b0\\u68c0\\u6d4b</a>"
+                + "<a class='secondary' href='pickoneq://repair'>\\u4fee\\u590d\\u8d44\\u6e90\\u5e76\\u91cd\\u8bd5</a>"
+                + "<a class='secondary' href='pickoneq://restart'>\\u91cd\\u542f\\u5e94\\u7528</a>"
+                + "<details><summary>\\u542f\\u52a8\\u8bca\\u65ad</summary>" + escapeHtml(diagnostic) + "</details>"
                 + "</div></body></html>";
-        webView.loadDataWithBaseURL(null, html, "text/html", "utf-8", null);
+        webView.loadDataWithBaseURL("https://local.pickoneq.invalid/", html, "text/html", "utf-8", null);
     }
 
     private String ensureProjectExtracted() {
         File target = new File(getFilesDir(), BUNDLE_ASSET);
         File marker = new File(target, ".bundle-version");
-        if (marker.isFile() && BUNDLE_VERSION.equals(readMarker(marker)) && new File(target, "bootstrap.mjs").isFile()) {
-            return target.getAbsolutePath();
-        }
+        if (marker.isFile() && BUNDLE_VERSION.equals(readMarker(marker)) && new File(target, "bootstrap.mjs").isFile()) return target.getAbsolutePath();
         deleteRecursively(target);
         if (!target.exists() && !target.mkdirs()) throw new IllegalStateException("cannot create " + target);
         try {
             copyAssetEntry(getAssets(), BUNDLE_ASSET, target);
             writeMarker(marker);
         } catch (IOException error) {
+            deleteRecursively(target);
             throw new IllegalStateException("cannot extract embedded Node project", error);
         }
         return target.getAbsolutePath();
@@ -640,17 +742,10 @@ public class MainActivity extends Activity {
         if (target.isDirectory()) return;
         File parent = target.getParentFile();
         if (parent != null && !parent.exists() && !parent.mkdirs()) throw new IOException("cannot create " + parent);
-        InputStream input = null;
-        OutputStream output = null;
-        try {
-            input = assets.open(assetPath);
-            output = new FileOutputStream(target);
-            byte[] buffer = new byte[16384];
+        try (InputStream input = assets.open(assetPath); OutputStream output = new FileOutputStream(target)) {
+            byte[] buffer = new byte[65536];
             int count;
             while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
-        } finally {
-            if (input != null) try { input.close(); } catch (IOException ignored) { }
-            if (output != null) try { output.close(); } catch (IOException ignored) { }
         }
     }
 
@@ -660,29 +755,44 @@ public class MainActivity extends Activity {
             File[] children = file.listFiles();
             if (children != null) for (File child : children) deleteRecursively(child);
         }
-        file.delete();
+        if (!file.delete() && file.exists()) Log.w(TAG, "Could not delete " + file);
     }
 
     private static String readMarker(File file) {
-        BufferedReader reader = null;
-        try {
-            reader = new BufferedReader(new InputStreamReader(new FileInputStream(file), "UTF-8"));
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(file), "UTF-8"))) {
             return reader.readLine();
-        } catch (IOException error) {
-            return null;
-        } finally {
-            if (reader != null) try { reader.close(); } catch (IOException ignored) { }
-        }
+        } catch (IOException error) { return null; }
     }
 
     private static void writeMarker(File file) throws IOException {
-        OutputStream output = null;
-        try {
-            output = new FileOutputStream(file);
-            output.write(BUNDLE_VERSION.getBytes("UTF-8"));
-        } finally {
-            if (output != null) try { output.close(); } catch (IOException ignored) { }
-        }
+        try (OutputStream output = new FileOutputStream(file)) { output.write(BUNDLE_VERSION.getBytes("UTF-8")); }
+    }
+
+    private void writeStartupLog(String message) {
+        try (OutputStream output = new FileOutputStream(new File(getFilesDir(), "startup.log"))) {
+            output.write(message.getBytes("UTF-8"));
+        } catch (IOException error) { Log.w(TAG, "Could not write startup log", error); }
+    }
+
+    private String readStartupLog() {
+        File file = new File(getFilesDir(), "startup.log");
+        if (!file.isFile()) return "";
+        StringBuilder text = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(file), "UTF-8"))) {
+            String line;
+            while ((line = reader.readLine()) != null && text.length() < 12000) text.append(line).append('\\n');
+        } catch (IOException ignored) { }
+        return text.toString();
+    }
+
+    private static String stackTrace(Throwable error) {
+        StringWriter buffer = new StringWriter();
+        error.printStackTrace(new PrintWriter(buffer));
+        return buffer.toString();
+    }
+
+    private static String escapeHtml(String value) {
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\\\"", "&quot;").replace("'", "&#39;");
     }
 
     @Override
@@ -695,7 +805,14 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    public void onBackPressed() {
+        if (webView != null && webView.canGoBack()) webView.goBack();
+        else super.onBackPressed();
+    }
+
+    @Override
     protected void onDestroy() {
+        pollGeneration += 1;
         if (webView != null) {
             webView.stopLoading();
             webView.destroy();
@@ -745,6 +862,7 @@ add_library(native-lib SHARED native-lib.cpp)
 target_include_directories(native-lib PRIVATE \${CMAKE_SOURCE_DIR}/include/node)
 find_library(log-lib log)
 target_link_libraries(native-lib libnode \${log-lib})
+target_link_options(native-lib PRIVATE "-Wl,-z,max-page-size=16384")
 `;
 }
 
@@ -754,14 +872,14 @@ function appBuildGradleSource(abis) {
 android {
     namespace '${ANDROID_PACKAGE}'
     compileSdk 35
-    ndkVersion '26.1.10909125'
+    ndkVersion '28.2.13676358'
     defaultConfig {
         applicationId '${ANDROID_PACKAGE}'
         minSdk 24
         targetSdk 35
         versionCode 1
         versionName '${APP_VERSION_NAME}'
-        externalNativeBuild { cmake { cppFlags '-std=c++17'; arguments '-DANDROID_STL=c++_shared' } }
+        externalNativeBuild { cmake { cppFlags '-std=c++17'; arguments '-DANDROID_STL=c++_shared', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON' } }
         ndk { abiFilters ${abiFiltersLiteral(abis)} }
     }
     externalNativeBuild { cmake { path 'src/main/cpp/CMakeLists.txt'; version '3.22.1' } }
@@ -776,7 +894,7 @@ dependencies { implementation 'androidx.core:core:1.15.0' }
 `;
 }
 
-async function writeAndroidProject(androidProject, options, environment) {
+async function writeAndroidProject(androidProject, options, environment, bundleVersion) {
   await rm(androidProject, { recursive: true, force: true });
   const javaDir = path.join(androidProject, 'app', 'src', 'main', 'java', ...ANDROID_PACKAGE.split('.'));
   const files = new Map([
@@ -790,19 +908,23 @@ include ':app'
 android.useAndroidX=true
 android.nonTransitiveRClass=true
 android.overridePathCheck=true
+android.builder.sdkDownload=true
 `],
     ['app/build.gradle', appBuildGradleSource(options.abis)],
     ['app/src/main/cpp/CMakeLists.txt', cmakeListsSource()],
     ['app/src/main/cpp/native-lib.cpp', nativeLibSource()],
-    [`app/src/main/java/${ANDROID_PACKAGE.split('.').join('/')}/MainActivity.java`, mainActivitySource()],
+    [`app/src/main/java/${ANDROID_PACKAGE.split('.').join('/')}/MainActivity.java`, mainActivitySource(bundleVersion)],
     ['app/src/main/AndroidManifest.xml', `<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <application
         android:allowBackup="false"
+        android:extractNativeLibs="true"
         android:usesCleartextTraffic="true"
         android:hardwareAccelerated="true"
+        android:icon="@drawable/app_icon"
+        android:roundIcon="@drawable/app_icon"
         android:label="@string/app_name"
         android:theme="@style/AppTheme">
         <activity
@@ -835,6 +957,11 @@ android.overridePathCheck=true
 `],
   ]);
 
+  const iconSource = path.join(toolRoot, 'public', 'pickoneq-icon.png');
+  assertExists(iconSource, `缺少 Android 图标：${iconSource}`);
+  const iconDestination = path.join(androidProject, 'app', 'src', 'main', 'res', 'drawable', 'app_icon.png');
+  await mkdir(path.dirname(iconDestination), { recursive: true });
+  await copyFile(iconSource, iconDestination);
   if (environment.sdkPath) {
     files.set('local.properties', `sdk.dir=${environment.sdkPath.replaceAll('\\', '/')}\n`);
   }
@@ -858,8 +985,9 @@ async function copyNodeMobileLibs(nodeMobileRoot, androidProject, abis) {
   for (const abi of abis) {
     const source = path.join(binDir, abi, 'libnode.so');
     if (!existsSync(source)) {
-      throw new Error(`nodejs-mobile ${NODE_MOBILE_RELEASE} 不包含 ABI "${abi}"（可用：${available.join(', ') || '无'}）。注意 18.20.4 没有 x86。`);
+      throw new Error(`Node Mobile ${NODE_MOBILE_VERSION} 不包含 ABI "${abi}"（可用：${available.join(', ') || '无'}）。默认仅构建 arm64-v8a，可用 --abi 显式选择其他架构。`);
     }
+    assert16kElf(source);
     const destination = path.join(androidProject, 'app', 'src', 'main', 'jniLibs', abi, 'libnode.so');
     await mkdir(path.dirname(destination), { recursive: true });
     await copyFile(source, destination);
@@ -876,6 +1004,17 @@ async function copyStagedAssets(stage, androidProject) {
   await cp(stage, destination, { recursive: true });
 }
 
+function verifyBuiltNativeLibraries(androidProject) {
+  const buildDir = path.join(androidProject, 'app', 'build');
+  const libraries = findFiles(buildDir, (name) => name.endsWith('.so'));
+  if (!libraries.length) throw new Error('Gradle 构建后未找到原生 .so，无法验证 16 KB 页面兼容性');
+  const checked = new Map();
+  for (const library of libraries) {
+    const key = `${path.basename(path.dirname(library))}/${path.basename(library)}`;
+    if (!checked.has(key)) checked.set(key, assert16kElf(library));
+  }
+  log(`16 KB 页面校验通过：${[...checked.keys()].join(', ')}`);
+}
 /* ------------------------------------------------------------------ *
  * Gradle
  * ------------------------------------------------------------------ */
@@ -888,6 +1027,8 @@ async function runGradleBuild(environment, androidProject, outputDir) {
 
   log('运行 Gradle assembleDebug（首次会下载 AGP/NDK/CMake，已接受 SDK 许可）...');
   await runCommand(environment.gradlePath, ['assembleDebug', '--no-daemon', '--console=plain'], androidProject, gradleEnv);
+
+  verifyBuiltNativeLibraries(androidProject);
 
   const source = path.join(androidProject, 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk');
   assertExists(source, `Gradle 已完成，但未找到 ${source}`);
@@ -965,7 +1106,9 @@ async function main() {
   const nodeMobileRoot = await ensureNodeMobile();
   log(`nodejs-mobile 目录：${nodeMobileRoot}`);
 
-  await writeAndroidProject(androidProject, options, environment);
+  const bundleVersion = runtimeFingerprint(stage);
+  log(`内置资源版本：${bundleVersion}`);
+  await writeAndroidProject(androidProject, options, environment, bundleVersion);
   await copyNodeMobileLibs(nodeMobileRoot, androidProject, options.abis);
   await copyStagedAssets(stage, androidProject);
   log(`Android 工程已生成：${androidProject}`);
@@ -979,7 +1122,7 @@ async function main() {
 
   console.log('');
   console.log('===== 构建摘要 =====');
-  console.log('模式         : LOCAL（内置 Node 18.20.4，监听 127.0.0.1:4311）');
+  console.log(`模式         : LOCAL（内置 Node ${NODE_MOBILE_VERSION}，16 KB 兼容，监听 127.0.0.1:4311）`);
   console.log(`ABI          : ${options.abis.join(', ')}`);
   console.log(`构建根目录   : ${buildRoot}`);
   console.log(`Android 工程 : ${androidProject}`);
@@ -997,8 +1140,22 @@ async function main() {
   reportKeyArtifacts(androidProject);
 }
 
-main().catch((error) => {
-  console.error(`[local-android] 构建失败：${error instanceof Error ? error.message : error}`);
-  if (error instanceof Error && error.stack && process.env.PICKONEQ_DEBUG) console.error(error.stack);
-  process.exitCode = 1;
-});
+const invokedDirectly = Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedDirectly) {
+  main().catch((error) => {
+    console.error(`[local-android] 构建失败：${error instanceof Error ? error.message : error}`);
+    if (error instanceof Error && error.stack && process.env.PICKONEQ_DEBUG) console.error(error.stack);
+    process.exitCode = 1;
+  });
+}
+
+export {
+  appBuildGradleSource,
+  assert16kElf,
+  cmakeListsSource,
+  mainActivitySource,
+  parseArgs,
+  readElfLoadAlignments,
+  runtimeFingerprint,
+  verifyBuiltNativeLibraries,
+};

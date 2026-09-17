@@ -11,7 +11,8 @@
     "check": "tsc --noEmit",
     "android:release": "npm --prefix tools/android-release run open",
     "android:release:build": "npm --prefix tools/android-release run build",
-    "android:apk": "npm --prefix tools/android-release run build:apk"
+    "android:apk": "npm --prefix tools/android-release run build:apk",
+    "android:remote-apk": "npm --prefix tools/android-release run build:remote-apk"
   },
   "dependencies": {
     "@fontsource/noto-serif-sc": "^5.3.0",
