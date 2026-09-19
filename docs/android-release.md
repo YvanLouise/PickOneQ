@@ -2,7 +2,7 @@
 
 ## 可独立运行的本地 APK
 
-本地 APK 会把前端、Express 服务、资料池与 Node Mobile 一并装入应用，不需要填写服务地址。默认构建 `arm64-v8a`，适用于绝大多数 Android 手机。
+本地 APK 会把前端、Express 服务、资料池与 Node Mobile 一并装入应用，不需要填写服务地址。默认同时构建 `arm64-v8a` 与 `armeabi-v7a`，兼容 64 位和 32 位 ARM Android 手机。
 
 双击项目根目录的 `构建本地安卓安装包.cmd`，或运行：
 
@@ -13,7 +13,7 @@ npm run android:apk
 
 输出文件：`releases/pickoneq-local-debug.apk`。
 
-本地包使用带 Android 16 KB 页面修复的 Node Mobile 18.20.4-2。构建结束前会检查 APK 中原生库的 ELF LOAD 对齐；任何 4 KB 不兼容库都会让构建明确失败，不再产出可能安装后打不开的 APK。
+本地包使用带 Android 16 KB 页面修复的 Node Mobile 18.20.4-2。JNI 启动桥接使用 Node Mobile 要求的连续参数内存；原生库加载失败会在应用内显示 Android 版本、ABI 与错误详情，不再直接闪退。构建结束前会检查 APK 中所有原生库的 ELF 结构，并对 64 位 ABI 强制检查 16 KB LOAD 对齐；不兼容时会明确失败，不再产出可能安装后打不开的 APK。
 
 首次启动需要解压内置服务，通常比后续启动慢。应用最多等待 90 秒，并在失败时显示设备内诊断，可重新检测、修复内置资源或重启应用。本地作答数据不会因这些恢复操作被清除。
 

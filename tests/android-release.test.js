@@ -18,7 +18,10 @@ import {
   assert16kElf,
   cmakeListsSource,
   mainActivitySource,
+  nativeLibSource,
+  parseArgs,
   readElfLoadAlignments,
+  verifyElfForAbi,
 } from '../tools/android-release/scripts/build-local-android.mjs';
 
 function config(overrides = {}) {
@@ -100,9 +103,25 @@ test('local Android launcher is 16 KB-ready and recoverable', () => {
   assert.match(activity, /pickoneq:\/\/restart/);
   assert.match(activity, /startup\.log/);
   assert.match(activity, /deleteRecursively\(target\)/);
+  assert.match(activity, /Build\.SUPPORTED_ABIS/);
+  assert.match(activity, /SUPPORTED_ABIS\) \+ "\\n"/);
+  assert.match(activity, /private boolean loadNativeLibraries\(\)/);
+  assert.doesNotMatch(activity, /static\s*\{\s*System\.loadLibrary/);
+  assert.ok(activity.indexOf('System.loadLibrary("node")') < activity.indexOf('System.loadLibrary("native-lib")'));
+  const nativeBridge = nativeLibSource();
+  assert.match(nativeBridge, /char\* argumentBuffer/);
+  assert.match(nativeBridge, /argv\[index\] = cursor/);
+  assert.match(nativeBridge, /cursor\[length\] = '\\0'/);
+  assert.doesNotMatch(nativeBridge, /strdup/);
+  assert.match(nativeBridge, /setenv\("TMPDIR"/);
   assert.match(cmakeListsSource(), /max-page-size=16384/);
-  const gradle = appBuildGradleSource(['arm64-v8a']);
+  const options = parseArgs([]);
+  assert.deepEqual(options.abis, ['arm64-v8a', 'armeabi-v7a']);
+  const gradle = appBuildGradleSource(options.abis);
   assert.match(gradle, /ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON/);
+  assert.match(gradle, /abiFilters 'arm64-v8a', 'armeabi-v7a'/);
+  assert.match(gradle, /versionCode 2/);
+  assert.match(gradle, /versionName '0\.1\.1-local'/);
   assert.ok(gradle.includes("ndkVersion '28.2.13676358'"));
 });
 
@@ -125,6 +144,8 @@ test('ELF guard rejects 4 KB libraries and accepts 16 KB libraries', async () =>
   elf.writeBigUInt64LE(0x1000n, 112);
   await writeFile(file, elf);
   assert.throws(() => assert16kElf(file), /不兼容 Android 16 KB 页面/);
+  assert.doesNotThrow(() => verifyElfForAbi(file, 'armeabi-v7a'));
+  assert.throws(() => verifyElfForAbi(file, 'arm64-v8a'), /不兼容 Android 16 KB 页面/);
 });
 
 test('android:apk command builds the standalone runtime and keeps remote wrapper separate', async () => {

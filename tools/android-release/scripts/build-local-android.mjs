@@ -23,7 +23,7 @@
  *   node tools/android-release/scripts/build-local-android.mjs [options]
  *
  * Options:
- *   --abi <csv>     Comma-separated ABIs (default: arm64-v8a)
+ *   --abi <csv>     Comma-separated ABIs (default: arm64-v8a,armeabi-v7a)
  *   --skip-gradle   Stage + generate the project only, do not run Gradle
  *   --no-install    Reuse the cached staging node_modules (skip npm install)
  *   --output <dir>  Where to copy the built APK (default: <projectRoot>/releases)
@@ -55,7 +55,7 @@ const NODE_MOBILE_ARCHIVE = `comapeo-nodejs-mobile-react-native-${NODE_MOBILE_VE
 const BUILD_ID = process.env.PICKONEQ_LOCAL_BUILD_ID || 'local';
 
 const ANDROID_PACKAGE = 'com.pickoneq.app';
-const APP_VERSION_NAME = '0.1.0-local';
+const APP_VERSION_NAME = '0.1.1-local';
 
 function log(message) {
   console.log(`[local-android] ${message}`);
@@ -73,7 +73,7 @@ function printUsage() {
   console.log(`用法：node tools/android-release/scripts/build-local-android.mjs [选项]
 
 选项：
-  --abi <csv>     逗号分隔的 ABI（默认：arm64-v8a）
+  --abi <csv>     逗号分隔的 ABI（默认：arm64-v8a,armeabi-v7a）
   --skip-gradle   仅暂存并生成 Android 工程，不运行 Gradle
   --no-install    复用缓存的 stage/node_modules，跳过 npm install
   --output <dir>  APK 输出目录（默认：<项目根>/releases）
@@ -82,7 +82,7 @@ function printUsage() {
 
 function parseArgs(argv) {
   const options = {
-    abis: ['arm64-v8a'],
+    abis: ['arm64-v8a', 'armeabi-v7a'],
     skipGradle: false,
     noInstall: false,
     output: defaultOutput,
@@ -227,6 +227,12 @@ function assert16kElf(file) {
     throw new Error(`${path.basename(file)} 不兼容 Android 16 KB 页面：LOAD 对齐为 ${alignments.map((value) => `0x${value.toString(16)}`).join(', ')}`);
   }
   return alignments;
+}
+
+function verifyElfForAbi(file, abi) {
+  return abi === 'arm64-v8a' || abi === 'x86_64'
+    ? assert16kElf(file)
+    : readElfLoadAlignments(file);
 }
 
 function runtimeFingerprint(root) {
@@ -414,6 +420,7 @@ import android.content.res.AssetManager;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
@@ -443,6 +450,7 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.util.Arrays;
 import java.net.HttpURLConnection;
 import java.net.URL;
 
@@ -454,13 +462,8 @@ public class MainActivity extends Activity {
     private static final int FILE_CHOOSER_REQUEST = 41;
     private static final long BOOTSTRAP_TIMEOUT_MS = 90000L;
     private static final long BOOTSTRAP_POLL_MS = 300L;
-
-    static {
-        System.loadLibrary("native-lib");
-        System.loadLibrary("node");
-    }
-
     private static final Object START_LOCK = new Object();
+    private static volatile boolean nativeLibrariesLoaded = false;
     private static volatile boolean nodeLaunchAttempted = false;
     private static volatile boolean nodeRunning = false;
     private static volatile String startupFailure = "";
@@ -482,6 +485,23 @@ public class MainActivity extends Activity {
         startNodeOnce();
     }
 
+    private boolean loadNativeLibraries() {
+        if (nativeLibrariesLoaded) return true;
+        try {
+            updateSplashStatus("\u6b63\u5728\u52a0\u8f7d\u672c\u5730\u8fd0\u884c\u5e93...");
+            System.loadLibrary("node");
+            System.loadLibrary("native-lib");
+            nativeLibrariesLoaded = true;
+            return true;
+        } catch (Throwable error) {
+            startupFailure = "Android SDK " + Build.VERSION.SDK_INT
+                    + ", ABIs " + Arrays.toString(Build.SUPPORTED_ABIS) + "\\n"
+                    + stackTrace(error);
+            writeStartupLog(startupFailure);
+            Log.e(TAG, "Native library load failed", error);
+            return false;
+        }
+    }
     private void createContent() {
         FrameLayout root = new FrameLayout(this);
         webView = new WebView(this);
@@ -578,6 +598,10 @@ public class MainActivity extends Activity {
     }
 
     private void startNodeOnce() {
+        if (!loadNativeLibraries()) {
+            showStartupError();
+            return;
+        }
         boolean shouldStart;
         synchronized (START_LOCK) {
             shouldStart = !nodeLaunchAttempted;
@@ -834,20 +858,59 @@ function nativeLibSource() {
 #define LOG_TAG "PickOneQNode"
 extern "C" JNIEXPORT jint JNICALL
 Java_com_pickoneq_app_MainActivity_startNodeWithArguments(JNIEnv* env, jobject /*this*/, jobjectArray arguments, jstring workingDir) {
-    jsize argc = env->GetArrayLength(arguments);
-    char** argv = (char**) calloc(argc, sizeof(char*));
-    for (int i = 0; i < argc; i++) {
-        jstring s = (jstring) env->GetObjectArrayElement(arguments, i);
-        const char* c = env->GetStringUTFChars(s, nullptr);
-        argv[i] = strdup(c);
-        env->ReleaseStringUTFChars(s, c); env->DeleteLocalRef(s);
+    const jsize argc = env->GetArrayLength(arguments);
+    size_t bufferSize = 0;
+    for (jsize index = 0; index < argc; index++) {
+        jstring value = (jstring) env->GetObjectArrayElement(arguments, index);
+        const char* chars = env->GetStringUTFChars(value, nullptr);
+        if (chars == nullptr) return -1;
+        bufferSize += std::strlen(chars) + 1;
+        env->ReleaseStringUTFChars(value, chars);
+        env->DeleteLocalRef(value);
     }
+
+    char* argumentBuffer = (char*) std::calloc(bufferSize, sizeof(char));
+    char** argv = (char**) std::calloc((size_t) argc, sizeof(char*));
+    if (argumentBuffer == nullptr || argv == nullptr) {
+        std::free(argumentBuffer);
+        std::free(argv);
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "Could not allocate Node argument buffer");
+        return -2;
+    }
+
+    char* cursor = argumentBuffer;
+    for (jsize index = 0; index < argc; index++) {
+        jstring value = (jstring) env->GetObjectArrayElement(arguments, index);
+        const char* chars = env->GetStringUTFChars(value, nullptr);
+        if (chars == nullptr) {
+            std::free(argv);
+            std::free(argumentBuffer);
+            return -3;
+        }
+        const size_t length = std::strlen(chars);
+        std::memcpy(cursor, chars, length);
+        cursor[length] = '\\0';
+        argv[index] = cursor;
+        cursor += length + 1;
+        env->ReleaseStringUTFChars(value, chars);
+        env->DeleteLocalRef(value);
+    }
+
     const char* dir = env->GetStringUTFChars(workingDir, nullptr);
+    if (dir == nullptr) {
+        std::free(argv);
+        std::free(argumentBuffer);
+        return -4;
+    }
     if (chdir(dir) != 0) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "chdir failed: %s", dir);
     setenv("PICKONEQ_ROOT", dir, 1);
+    setenv("TMPDIR", dir, 1);
     __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "node::Start argc=%d cwd=%s", (int) argc, dir);
     env->ReleaseStringUTFChars(workingDir, dir);
-    int result = node::Start((int) argc, argv);
+
+    const int result = node::Start((int) argc, argv);
+    std::free(argv);
+    std::free(argumentBuffer);
     return (jint) result;
 }
 `;
@@ -877,7 +940,7 @@ android {
         applicationId '${ANDROID_PACKAGE}'
         minSdk 24
         targetSdk 35
-        versionCode 1
+        versionCode 2
         versionName '${APP_VERSION_NAME}'
         externalNativeBuild { cmake { cppFlags '-std=c++17'; arguments '-DANDROID_STL=c++_shared', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON' } }
         ndk { abiFilters ${abiFiltersLiteral(abis)} }
@@ -985,9 +1048,9 @@ async function copyNodeMobileLibs(nodeMobileRoot, androidProject, abis) {
   for (const abi of abis) {
     const source = path.join(binDir, abi, 'libnode.so');
     if (!existsSync(source)) {
-      throw new Error(`Node Mobile ${NODE_MOBILE_VERSION} 不包含 ABI "${abi}"（可用：${available.join(', ') || '无'}）。默认仅构建 arm64-v8a，可用 --abi 显式选择其他架构。`);
+      throw new Error(`Node Mobile ${NODE_MOBILE_VERSION} 不包含 ABI "${abi}"（可用：${available.join(', ') || '无'}）。默认构建 arm64-v8a 与 armeabi-v7a，可用 --abi 显式选择其他架构。`);
     }
-    assert16kElf(source);
+    verifyElfForAbi(source, abi);
     const destination = path.join(androidProject, 'app', 'src', 'main', 'jniLibs', abi, 'libnode.so');
     await mkdir(path.dirname(destination), { recursive: true });
     await copyFile(source, destination);
@@ -1010,10 +1073,12 @@ function verifyBuiltNativeLibraries(androidProject) {
   if (!libraries.length) throw new Error('Gradle 构建后未找到原生 .so，无法验证 16 KB 页面兼容性');
   const checked = new Map();
   for (const library of libraries) {
-    const key = `${path.basename(path.dirname(library))}/${path.basename(library)}`;
-    if (!checked.has(key)) checked.set(key, assert16kElf(library));
+    const abi = path.basename(path.dirname(library));
+    const key = `${abi}/${path.basename(library)}`;
+    if (!checked.has(key)) checked.set(key, verifyElfForAbi(library, abi));
   }
-  log(`16 KB 页面校验通过：${[...checked.keys()].join(', ')}`);
+  const pageSizeLibraries = [...checked.keys()].filter((key) => key.startsWith('arm64-v8a/') || key.startsWith('x86_64/'));
+  log(`原生库校验通过：${checked.size} 个；16 KB 页面兼容：${pageSizeLibraries.join(', ')}`);
 }
 /* ------------------------------------------------------------------ *
  * Gradle
@@ -1062,9 +1127,9 @@ function printTree(root, maxDepth) {
   walk(root, '', 1);
 }
 
-function reportKeyArtifacts(androidProject) {
+function reportKeyArtifacts(androidProject, abis) {
   const required = [
-    'app/src/main/jniLibs/arm64-v8a/libnode.so',
+    ...abis.map((abi) => `app/src/main/jniLibs/${abi}/libnode.so`),
     'app/src/main/cpp/include/node/node.h',
     'app/src/main/assets/nodejs-project/server/index.js',
     'app/src/main/assets/nodejs-project/dist/index.html',
@@ -1137,7 +1202,7 @@ async function main() {
   console.log('');
   printTree(buildRoot, 3);
   console.log('');
-  reportKeyArtifacts(androidProject);
+  reportKeyArtifacts(androidProject, options.abis);
 }
 
 const invokedDirectly = Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -1154,8 +1219,10 @@ export {
   assert16kElf,
   cmakeListsSource,
   mainActivitySource,
+  nativeLibSource,
   parseArgs,
   readElfLoadAlignments,
   runtimeFingerprint,
   verifyBuiltNativeLibraries,
+  verifyElfForAbi,
 };
